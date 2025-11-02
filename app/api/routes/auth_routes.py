@@ -1,26 +1,46 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-
-from app.api.services.user_service import create_user, login_user
 from app.core.database import get_db
-from app.models.user import User
-from app.shemas.user_shema import UserCreate, UserResponse, UserLogin
+from app.shemas.user_shema import UserCreate, Token, LoginRequest
+from app.api.services.user_service import create_user, authenticate_user
+from app.core.security import create_access_token
 
 router = APIRouter()
 
 
-@router.post("/register")
+@router.post("/register", response_model=Token)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
-    """Регистрация нового пользователя"""
-    if db.query(User).filter(User.email == user_in.email).first():
-        raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
-    create_user(db, user_in)
-    return login_user(db, user_in.email, user_in.password)
+    print("Начало регистрации")
+    try:
+        # Создаем пользователя
+        user = create_user(db, user_in)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Пользователь с таким email уже существует"
+            )
 
-@router.post("/login")
-def login(user_in: UserLogin, db: Session = Depends(get_db)):
-    """Вход и получение JWT-токена"""
-    auth = login_user(db, user_in.email, user_in.password)
-    if not auth:
-        raise HTTPException(status_code=401, detail="Неверный email или пароль")
-    return auth
+        # Создаем токен
+        access_token = create_access_token(data={"sub": user.email})
+        return {"access_token": access_token, "token_type": "bearer"}
+
+    except Exception as e:
+        print(f"Ошибка в роутере регистрации: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при создании пользователя: {str(e)}"
+        )
+
+
+@router.post("/login", response_model=Token)
+def login(login_data: LoginRequest, db: Session = Depends(get_db)):
+    user = authenticate_user(db, login_data.email, login_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный email или пароль",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}

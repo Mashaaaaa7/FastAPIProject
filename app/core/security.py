@@ -1,6 +1,5 @@
 # security.py
 from datetime import datetime, timedelta
-
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
@@ -9,11 +8,11 @@ SECRET_KEY = "super_secret_key_123"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 часа
 
-# Настройка хэширования паролей
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ЗАМЕНИТЕ bcrypt на argon2 - у него НЕТ ограничения 72 байта
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 def hash_password(password: str) -> str:
-    """Создание хэша пароля"""
+    """Создание хэша пароля БЕЗ ограничений длины"""
     return pwd_context.hash(password)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

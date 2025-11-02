@@ -1,38 +1,45 @@
-# user_service.py
 from sqlalchemy.orm import Session
-
-from app.core.security import hash_password, verify_password, create_access_token
 from app.models.user import User
 from app.shemas.user_shema import UserCreate
+from app.core.security import hash_password, verify_password
 
 
-def create_user(db: Session, user_in: UserCreate) -> User:
-    """Создаёт нового пользователя"""
-    user = User(
-        email=user_in.email,
-        hashed_password=hash_password(user_in.password),
-        full_name=user_in.full_name,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
+def get_user_by_email(db: Session, email: str):
+    return db.query(User).filter(User.email == email).first()
 
-def authenticate_user(db: Session, email: str, password: str) -> User | None:
-    """Проверяет email и пароль"""
-    user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(password, user.hashed_password):
+
+def create_user(db: Session, user: UserCreate):
+    print(f"Создание пользователя: {user.email}")
+
+    # Проверяем, существует ли пользователь
+    db_user = get_user_by_email(db, email=user.email)
+    if db_user:
+        print("Пользователь уже существует")
         return None
-    return user
 
-def login_user(db: Session, email: str, password: str):
-    """Возвращает токен, если пользователь прошёл проверку"""
-    user = authenticate_user(db, email, password)
+    # Создаем нового пользователя без full_name
+    try:
+        hashed_password = hash_password(user.password)
+        db_user = User(
+            email=user.email,
+            # full_name не передаем - будет NULL в базе
+            hashed_password=hashed_password
+        )
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        print(f"Пользователь создан: {db_user.id}")
+        return db_user
+    except Exception as e:
+        db.rollback()
+        print(f"Ошибка при создании пользователя: {e}")
+        raise e
+
+
+def authenticate_user(db: Session, email: str, password: str):
+    user = get_user_by_email(db, email)
     if not user:
-        return None
-    token = create_access_token({"sub": user.email})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "email": user.email
-    }
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user

@@ -1,14 +1,22 @@
 from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from typing import Optional
 
 class UserBase(BaseModel):
     email: EmailStr
 
 class UserCreate(UserBase):
     password: str
+    timezone: str = "UTC+3"
+    full_name: Optional[str] = None
 
-class User(UserBase):
+
+class UserResponse(BaseModel):
     id: int
-    full_name: str | None = None  # Оставляем в ответе, но не в создании
+    email: str
+    full_name: Optional[str] = None
+    timezone: str
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -20,3 +28,4 @@ class Token(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    timezone: str = "UTC"

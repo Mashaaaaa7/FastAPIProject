@@ -7,7 +7,6 @@ from app.core.security import create_access_token
 
 router = APIRouter()
 
-
 @router.post("/register", response_model=Token)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
     print("Начало регистрации")
@@ -20,7 +19,7 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
                 detail="Пользователь с таким email уже существует"
             )
 
-        # Создаем токен
+        # ✅ ОСТАВЛЯЕМ email в токене (безопаснее)
         access_token = create_access_token(data={"sub": user.email})
         return {"access_token": access_token, "token_type": "bearer"}
 
@@ -30,7 +29,6 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при создании пользователя: {str(e)}"
         )
-
 
 @router.post("/login", response_model=Token)
 def login(login_data: LoginRequest, db: Session = Depends(get_db)):
@@ -42,5 +40,6 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # ✅ ОСТАВЛЯЕМ email в токене
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}

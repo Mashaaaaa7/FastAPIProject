@@ -8,7 +8,6 @@ SECRET_KEY = "super_secret_key_123"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 часа
 
-# ЗАМЕНИТЕ bcrypt на argon2 - у него НЕТ ограничения 72 байта
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 def hash_password(password: str) -> str:

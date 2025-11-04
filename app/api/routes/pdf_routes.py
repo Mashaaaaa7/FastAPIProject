@@ -2,24 +2,70 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional
+import pytz
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Header
+from fastapi import APIRouter, UploadFile, File, HTTPException, Header, Depends, Request
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models.pdf_files import PDFFile, ActionHistory
+from app.models.user import User
+from app.api.routes.user_routes import get_current_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Хранилище в памяти
-files_storage = []
-history_storage = []  # ← Добавляем хранилище для истории
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 router = APIRouter()
 
+
+def get_user_timezone_from_ip(request: Request):
+    """Определяет часовой пояс по IP адресу (упрощенная версия)"""
+    try:
+        client_ip = request.client.host
+
+        # Если локальный IP, используем дефолтный (можно изменить на нужный)
+        if client_ip in ['127.0.0.1', 'localhost']:
+            return 'Europe/Moscow'  # Или другой дефолтный часовой пояс
+
+        # Для простоты используем дефолтный часовой пояс
+        # В реальном приложении можно использовать API геолокации
+        return 'Europe/Moscow'
+
+    except:
+        return 'UTC + 3'
+
+
+def get_user_time(timezone_str: str):
+    """Возвращает текущее время в указанном часовом поясе"""
+    try:
+        user_tz = pytz.timezone(timezone_str)
+        return datetime.now(user_tz)
+    except:
+        # Если часовой пояс невалидный, используем UTC
+        return datetime.now(pytz.UTC)
+
+
 @router.post("/upload")
-async def upload_pdf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
-    logger.info(f"📨 Получен файл: {file.filename}")
-    logger.info(f"🔐 Заголовок авторизации: {authorization}")
+async def upload_pdf(
+        file: UploadFile = File(...),
+        request: Request = None,
+        authorization: Optional[str] = Header(None),
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    # Определяем часовой пояс
+    if request:
+        user_timezone = get_user_timezone_from_ip(request)
+    else:
+        # Если request не передан, используем время UTC
+        user_timezone = 'UTC + 3'
+
+    user_time = get_user_time(user_timezone)
+
+    logger.info(f"📨 Получен файл: {file.filename} от пользователя: {current_user.email} (Timezone: {user_timezone})")
 
     if not file.filename:
         raise HTTPException(400, "No file provided")
@@ -28,65 +74,149 @@ async def upload_pdf(file: UploadFile = File(...), authorization: Optional[str] 
         raise HTTPException(400, "Only PDF files are allowed")
 
     try:
+        existing_file = db.query(PDFFile).filter(
+            PDFFile.filename == file.filename,
+            PDFFile.user_id == current_user.id
+        ).first()
+
+        if existing_file:
+            raise HTTPException(400, "File with this name already exists")
+
+        # Создаем папку для пользователя
+        user_upload_dir = os.path.join(UPLOAD_DIR, str(current_user.id))
+        os.makedirs(user_upload_dir, exist_ok=True)
+
         # Сохраняем файл
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        logger.info(f"💾 Сохраняем в: {file_path}")
+        file_path = os.path.join(user_upload_dir, file.filename)
 
         with open(file_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
 
         file_size = len(content)
-        logger.info(f"✅ Файл сохранен, размер: {file_size} bytes")
 
-        # Сохраняем информацию о файле
-        file_info = {
-            "name": file.filename,
-            "file_size": file_size,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        files_storage.append(file_info)
+        # Сохраняем в БД с ВРЕМЕНЕМ ПОЛЬЗОВАТЕЛЯ
+        file_info = PDFFile(
+            filename=file.filename,
+            file_size=file_size,
+            file_path=file_path,
+            user_id=current_user.id,
+            created_at=user_time  # ВРЕМЯ ПОЛЬЗОВАТЕЛЯ
+        )
+        db.add(file_info)
+        db.commit()
+        db.refresh(file_info)
 
-        # Добавляем запись в историю
-        history_record = {
-            "action": "upload_pdf",
-            "filename": file.filename,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "details": f"Uploaded PDF file: {file.filename} ({file_size} bytes)"
-        }
-        history_storage.append(history_record)
+        # История с ВРЕМЕНЕМ ПОЛЬЗОВАТЕЛЯ
+        history_record = ActionHistory(
+            action="upload_pdf",
+            filename=file.filename,
+            details=f"Uploaded PDF file: {file.filename} ({file_size} bytes)",
+            user_id=current_user.id,
+            timestamp=user_time  # ВРЕМЯ ПОЛЬЗОВАТЕЛЯ
+        )
+        db.add(history_record)
+        db.commit()
 
         return {
             "success": True,
             "message": f"File {file.filename} uploaded successfully",
-            "filename": file.filename
+            "filename": file.filename,
+            "user_time": user_time.isoformat(),  # Возвращаем время пользователя
+            "user_timezone": user_timezone
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
+        db.rollback()
         raise HTTPException(500, f"Server error: {str(e)}")
 
 
-@router.post("/decks")
-def list_decks():
-    return {"success": True, "decks": files_storage}
+@router.get("/decks")
+def list_decks(
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    user_files = db.query(PDFFile).filter(
+        PDFFile.user_id == current_user.id
+    ).all()
+
+    files_data = [
+        {
+            "name": file.filename,
+            "file_size": file.file_size,
+            "created_at": file.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        for file in user_files
+    ]
+
+    return {"success": True, "decks": files_data}
 
 
-@router.get("/decks/{deck_name}/cards")
-async def create_cards(deck_name: str):
-    # Проверяем есть ли файл
-    file_exists = any(f["name"] == deck_name for f in files_storage)
+@router.get("/history")
+async def get_history(
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    user_history = db.query(ActionHistory).filter(
+        ActionHistory.user_id == current_user.id
+    ).order_by(ActionHistory.timestamp.desc()).all()
+
+    history_data = [
+        {
+            "id": record.id,
+            "action": record.action,
+            "deck_name": record.deck_name,
+            "filename": record.filename,
+            "timestamp": record.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "details": record.details
+        }
+        for record in user_history
+    ]
+
+    return {
+        "success": True,
+        "history": history_data,
+        "total": len(history_data)
+    }
+
+
+@router.post("/decks/{deck_name}/cards")
+async def create_cards(
+        deck_name: str,
+        request: Request = None,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    file_exists = db.query(PDFFile).filter(
+        PDFFile.filename == deck_name,
+        PDFFile.user_id == current_user.id
+    ).first()
+
     if not file_exists:
         raise HTTPException(404, "PDF file not found")
 
-    # Добавляем запись в историю
-    history_record = {
-        "action": "create_cards",
-        "deck_name": deck_name,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "details": f"Created flashcards from deck: {deck_name}"
-    }
-    history_storage.append(history_record)
+    # Определяем часовой пояс для времени
+    if request:
+        user_timezone = get_user_timezone_from_ip(request)
+    else:
+        user_timezone = 'UTC'
+
+    user_time = get_user_time(user_timezone)
+
+    # История с ВРЕМЕНЕМ ПОЛЬЗОВАТЕЛЯ
+    history_record = ActionHistory(
+        action="create_cards",
+        deck_name=deck_name,
+        details=f"Created flashcards from deck: {deck_name}",
+        user_id=current_user.id,
+        timestamp=user_time  # ВРЕМЯ ПОЛЬЗОВАТЕЛЯ
+    )
+    db.add(history_record)
+    db.commit()
 
     # Демо-карточки
     cards = [
@@ -99,51 +229,52 @@ async def create_cards(deck_name: str):
 
 
 @router.delete("/decks/{deck_name}")
-async def delete_deck(deck_name: str):
-    # Ищем и удаляем файл
-    global files_storage
+async def delete_deck(
+        deck_name: str,
+        request: Request = None,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    # Находим файл в БД
+    file_record = db.query(PDFFile).filter(
+        PDFFile.filename == deck_name,
+        PDFFile.user_id == current_user.id
+    ).first()
 
-    # Находим индекс первого файла с таким именем
-    file_index = None
-    for i, f in enumerate(files_storage):
-        if f["name"] == deck_name:
-            file_index = i
-            break
-
-    if file_index is None:
+    if not file_record:
         raise HTTPException(404, "PDF file not found")
 
-    # Получаем информацию о файле перед удалением
-    file_to_delete = files_storage[file_index]
-
-    # Удаляем только один файл по индексу
-    files_storage.pop(file_index)
-
-    # Также удаляем физический файл
-    file_path = os.path.join(UPLOAD_DIR, deck_name)
     try:
+        # Удаляем ТОЛЬКО физический файл из папки uploads
+        file_path = file_record.file_path
         if os.path.exists(file_path):
             os.remove(file_path)
             logger.info(f"🗑️ Физический файл удален: {file_path}")
+        else:
+            logger.warning(f"⚠️ Физический файл не найден: {file_path}")
+
+        # Определяем часовой пояс для времени
+        if request:
+            user_timezone = get_user_timezone_from_ip(request)
+        else:
+            user_timezone = 'UTC'
+
+        user_time = get_user_time(user_timezone)
+
+        # Сохраняем историю с ВРЕМЕНЕМ ПОЛЬЗОВАТЕЛЯ
+        history_record = ActionHistory(
+            action="delete_deck",
+            deck_name=deck_name,
+            details=f"Deleted physical file: {deck_name} (record kept in DB)",
+            user_id=current_user.id,
+            timestamp=user_time  # ВРЕМЯ ПОЛЬЗОВАТЕЛЯ
+        )
+        db.add(history_record)
+        db.commit()
+
+        return {"success": True, "message": f"File {deck_name} deleted (physical file only)"}
+
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления физического файла: {e}")
-
-    # Добавляем запись в историю
-    history_record = {
-        "action": "delete_deck",
-        "deck_name": deck_name,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "details": f"Deleted deck: {deck_name} (size: {file_to_delete['file_size']} bytes)"
-    }
-    history_storage.append(history_record)
-
-    return {"success": True, "message": f"Deck {deck_name} deleted"}
-
-@router.get("/history")
-async def get_history():
-    logger.info("📖 Запрос истории действий")
-    return {
-        "success": True,
-        "history": history_storage,
-        "total": len(history_storage)
-    }
+        logger.error(f"❌ Ошибка удаления: {e}")
+        db.rollback()
+        raise HTTPException(500, f"Server error: {str(e)}")

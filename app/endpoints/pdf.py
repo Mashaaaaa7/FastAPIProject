@@ -96,3 +96,31 @@ async def get_cards(file_name: str, user: User = Depends(get_current_user)):
     finally:
         db.close()
 
+
+@router.get("/history")
+async def get_history(user: User = Depends(get_current_user)):
+    """Получить историю действий пользователя из БД"""
+    db = SessionLocal()
+    try:
+        actions = crud.get_history(db, user.user_id)
+
+        history_data = [
+            {
+                "id": action.id,
+                "action": action.action,
+                "filename": action.filename or "unknown",
+                "timestamp": action.created_at.isoformat(),
+                "details": f"{action.action} file: {action.filename}"
+            }
+            for action in actions
+        ]
+
+        return {
+            "success": True,
+            "history": history_data,
+            "total": len(history_data)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()

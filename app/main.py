@@ -23,8 +23,9 @@ app.add_middleware(
 
 # Маршруты
 from app.endpoints import pdf, user
-app.include_router(user.router, prefix="", tags=["auth"])
-app.include_router(pdf.router, prefix="", tags=["files"])
+
+app.include_router(user.router, prefix="/api/auth", tags=["auth"])
+app.include_router(pdf.router, prefix="/api", tags=["files"])
 
 @app.get("/")
 def read_root():

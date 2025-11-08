@@ -5,34 +5,35 @@ import unicodedata
 from typing import List, Dict
 import torch
 import random
+import requests
 
 
 class QAGenerator:
-    def __init__(self):
+    def __init__(self, use_ollama: bool = False):
         self.device = 0 if torch.cuda.is_available() else -1
+        self.use_ollama = use_ollama
 
-        print("⏳ Загружаю модель для генерации контента...")
+        if use_ollama:
+            print("⏳ Используем Ollama для генерации контента...")
+            self.ollama_url = "http://localhost:11434/api/generate"
+        else:
+            print("⏳ Загружаю русскую модель для генерации контента...")
 
-        # Используем одну модель для генерации вопросов и ответов
-        self.generator = pipeline(
-            "text2text-generation",
-            model="google/flan-t5-small",
-            device=self.device,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-        )
-
-        print("✅ Модель загружена!")
+            self.generator = pipeline(
+                "text2text-generation",
+                model="cointegrated/rut5-base-multitask",
+                device=self.device,
+                torch_dtype=torch.float32
+            )
+            print("✅ Модель загружена!")
 
     def clean_text(self, text: str) -> str:
         """Очищает текст от артефактов"""
         if not text:
             return ""
 
-        # Удаляем невидимые символы
         text = ''.join(ch for ch in text if unicodedata.category(ch)[0] != 'C' or ch in '\n\t')
-
-        # Удаляем множественные пробелы и странные символы
-        text = re.sub(r'[>~<•»«„"\[\]]+', '', text)
+        text = re.sub(r'[>~<•»«„"\[\]{}()_\-–—]+', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
 
         return text
@@ -50,28 +51,23 @@ class QAGenerator:
                     if not raw_text:
                         continue
 
-                    # Очищаем текст
                     text = self.clean_text(raw_text)
 
                     if len(text) < 100:
                         continue
 
-                    # Разбиваем на абзацы и предложения
                     paragraphs = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 50]
 
                     for para in paragraphs:
-                        # Разбиваем на предложения
                         sentences = re.split(r'[.!?]+\s+', para)
 
                         for sent in sentences:
                             sent = self.clean_text(sent)
                             words = sent.split()
 
-                            # Отбираем содержательные предложения
-                            if (15 <= len(words) <= 40 and
-                                    len(sent) > 30 and
-                                    any(word.istitle() for word in words) and
-                                    not any(tech in sent.lower() for tech in ['function', 'var ', 'const ', 'import'])):
+                            if (8 <= len(words) <= 50 and
+                                    len(sent) > 40 and
+                                    sum(1 for c in sent if c.isalpha()) / len(sent) > 0.7):
                                 chunks.append({
                                     "text": sent,
                                     "page": i + 1,
@@ -85,78 +81,96 @@ class QAGenerator:
             print(f"❌ Ошибка при извлечении текста: {e}")
             return []
 
-    def generate_qa_pair(self, context: str) -> Dict:
-        """Генерирует пару вопрос-ответ из контекста"""
+    def generate_qa_pair_ollama(self, context: str) -> Dict:
+        """Генерирует QA пару через Ollama"""
         try:
-            # Ограничиваем длину контекста для модели
-            context_clean = self.clean_text(context[:500])
+            prompt = f"""На основе этого текста создай вопрос и ответ на русском:
+
+Текст: {context[:400]}
+
+Формат ответа (точно):
+ВОПРОС: [вопрос на русском]
+ОТВЕТ: [ответ на русском]"""
+
+            response = requests.post(
+                self.ollama_url,
+                json={"model": "llama2", "prompt": prompt, "stream": False}
+            )
+
+            if response.status_code != 200:
+                return None
+
+            generated = response.json()['response']
+
+            question_match = re.search(r'ВОПРОС:\s*(.*?)(?=\s*ОТВЕТ:|$)', generated, re.DOTALL)
+            answer_match = re.search(r'ОТВЕТ:\s*(.*?)$', generated, re.DOTALL)
+
+            if question_match and answer_match:
+                question = self.clean_text(question_match.group(1).strip())
+                answer = self.clean_text(answer_match.group(1).strip())
+
+                if len(question) > 15 and len(answer) > 20 and '?' in question:
+                    return {
+                        "question": question,
+                        "answer": answer,
+                        "context": context[:200] + "..." if len(context) > 200 else context
+                    }
+            return None
+
+        except Exception as e:
+            print(f"⚠️ Ошибка Ollama: {e}")
+            return None
+
+    def generate_qa_pair_rut5(self, context: str) -> Dict:
+        """Генерирует QA пару через RuT5"""
+        try:
+            context_clean = self.clean_text(context[:400])
 
             if len(context_clean) < 30:
                 return None
 
-            # Промпт для генерации вопроса
-            question_prompt = f"""
-            Создай учебный вопрос на основе этого текста: {context_clean}
-            Вопрос должен проверять понимание материала.
-            """
+            prompt = f"вопрос-ответ: {context_clean}"
 
-            question_result = self.generator(
-                question_prompt,
-                max_new_tokens=50,
-                num_beams=2,
-                temperature=0.8
+            result = self.generator(
+                prompt,
+                max_new_tokens=80,
+                num_beams=2
             )
 
-            question = self.clean_text(question_result[0]['generated_text'])
+            generated = self.clean_text(result[0]['generated_text'])
 
-            # Убеждаемся, что вопрос заканчивается знаком вопроса
-            if not question.endswith('?'):
-                question += '?'
+            parts = generated.split(' | ')
+            if len(parts) >= 2:
+                question = self.clean_text(parts[0])
+                answer = self.clean_text(parts[1])
 
-            # Генерируем ответ на основе контекста
-            answer_prompt = f"""
-            На основе текста: {context_clean}
-            Дай развернутый ответ на вопрос: {question}
-            Ответ должен быть информативным и точным.
-            """
+                if not question.endswith('?'):
+                    question += '?'
 
-            answer_result = self.generator(
-                answer_prompt,
-                max_new_tokens=100,
-                num_beams=2,
-                temperature=0.7
-            )
-
-            answer = self.clean_text(answer_result[0]['generated_text'])
-
-            # Проверяем качество сгенерированной пары
-            if (len(question) > 10 and len(answer) > 15 and
-                    '?' in question and len(answer) > len(question)):
-
-                return {
-                    "question": question,
-                    "answer": answer,
-                    "context": context_clean[:200] + "..." if len(context_clean) > 200 else context_clean
-                }
-            else:
-                return None
-
-        except Exception as e:
-            print(f"⚠️ Ошибка при генерации QA пары: {e}")
+                if len(question) > 15 and len(answer) > 20:
+                    return {
+                        "question": question,
+                        "answer": answer,
+                        "context": context_clean[:200] + "..." if len(context_clean) > 200 else context_clean
+                    }
             return None
 
-    def create_fallback_qa(self, context: str, idx: int) -> Dict:
-        """Создает резервную QA пару если модель не справляется"""
+        except Exception as e:
+            print(f"⚠️ Ошибка RuT5: {e}")
+            return None
+
+    def create_fallback_qa(self, context: str) -> Dict:
+        """Создает резервную QA пару"""
         words = context.split()
-        key_terms = [word for word in words if len(word) > 4 and word.isalpha()]
+        key_terms = [word for word in words if len(word) > 4 and word[0].isupper()]
 
         if key_terms:
-            term = random.choice(key_terms[:3])
-            question = f"Что означает термин '{term}' в этом контексте?"
-            answer = f"В данном контексте '{term}' относится к: {context[:150]}..."
+            term = random.choice(key_terms[:3]) if key_terms else "понятие"
+            question = f"Что означает '{term}' в контексте этого текста?"
+            answer = f"{term} в данном контексте означает: {context[:180]}..."
         else:
-            question = f"В чем основная идея этого утверждения?"
-            answer = f"Основная идея: {context[:200]}..."
+            question = "Какую основную информацию содержит этот текст?"
+            answer = f"Основное содержание: {context[:200]}..."
 
         return {
             "question": question,
@@ -164,11 +178,10 @@ class QAGenerator:
             "context": context[:150] + "..." if len(context) > 150 else context
         }
 
-    def process_pdf(self, file_path: str, max_cards: int = 20) -> List[Dict]:
+    def process_pdf(self, file_path: str, max_cards: int = 10) -> List[Dict]:
         print(f"\n🔄 Начинаю обработку {file_path}...")
         print(f"🎯 Цель: {max_cards} карточек")
 
-        # Извлекаем текст
         chunks = self.extract_meaningful_text(file_path)
 
         if not chunks:
@@ -177,21 +190,18 @@ class QAGenerator:
 
         print(f"✅ Найдено {len(chunks)} содержательных фрагментов")
 
-        # Сортируем по длине (предпочтение средним по длине фрагментам)
-        chunks.sort(key=lambda x: abs(x['word_count'] - 25))  # Идеально 20-30 слов
+        chunks.sort(key=lambda x: abs(x['word_count'] - 20))
 
         flashcards = []
-        attempts = 0
-        max_attempts = max_cards * 2  # Ограничиваем попытки
 
-        for chunk in chunks:
-            if len(flashcards) >= max_cards or attempts >= max_attempts:
+        for chunk in chunks[:max_cards * 2]:
+            if len(flashcards) >= max_cards:
                 break
 
-            attempts += 1
-
-            # Пробуем сгенерировать QA пару с помощью модели
-            qa_pair = self.generate_qa_pair(chunk['text'])
+            if self.use_ollama:
+                qa_pair = self.generate_qa_pair_ollama(chunk['text'])
+            else:
+                qa_pair = self.generate_qa_pair_rut5(chunk['text'])
 
             if qa_pair:
                 flashcard = {
@@ -204,36 +214,16 @@ class QAGenerator:
                 flashcards.append(flashcard)
                 print(f"  ✅ [{len(flashcards)}] Q: {qa_pair['question'][:70]}...")
             else:
-                # Используем резервный метод для каждого 3-го чанка
-                if attempts % 3 == 0 and len(flashcards) < max_cards:
-                    fallback_qa = self.create_fallback_qa(chunk['text'], len(flashcards) + 1)
-                    flashcard = {
-                        "id": len(flashcards) + 1,
-                        "question": fallback_qa["question"],
-                        "answer": fallback_qa["answer"],
-                        "context": fallback_qa["context"],
-                        "source": f"Page {chunk['page']}"
-                    }
-                    flashcards.append(flashcard)
-                    print(f"  🔄 [{len(flashcards)}] Резервный: {fallback_qa['question'][:70]}...")
+                fallback_qa = self.create_fallback_qa(chunk['text'])
+                flashcard = {
+                    "id": len(flashcards) + 1,
+                    "question": fallback_qa["question"],
+                    "answer": fallback_qa["answer"],
+                    "context": fallback_qa["context"],
+                    "source": f"Page {chunk['page']}"
+                }
+                flashcards.append(flashcard)
+                print(f"  🔄 [{len(flashcards)}] Fallback: {fallback_qa['question'][:70]}...")
 
-        # Если карточек все еще мало, добавляем простые
-        if len(flashcards) < max_cards:
-            remaining = max_cards - len(flashcards)
-            print(f"🔄 Добавляю {remaining} простых карточек...")
-
-            for i in range(remaining):
-                if i < len(chunks):
-                    chunk = chunks[i]
-                    simple_qa = self.create_fallback_qa(chunk['text'], len(flashcards) + 1)
-                    flashcard = {
-                        "id": len(flashcards) + 1,
-                        "question": simple_qa["question"],
-                        "answer": simple_qa["answer"],
-                        "context": simple_qa["context"],
-                        "source": f"Page {chunk['page']}"
-                    }
-                    flashcards.append(flashcard)
-
-        print(f"✅ Создано {len(flashcards)} карточек из {attempts} попыток")
+        print(f"✅ Создано {len(flashcards)} карточек")
         return flashcards

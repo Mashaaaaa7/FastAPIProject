@@ -173,35 +173,6 @@ def process_pdf_background(file_id: int, file_path: str, filename: str, user_id:
     finally:
         db.close()
 
-
-@router.get("/status/{file_id}")
-async def get_status(
-        file_id: int,
-        user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Получить статус обработки"""
-    try:
-        status = db.query(models.ProcessingStatus).filter(
-            models.ProcessingStatus.pdf_file_id == file_id,
-            models.ProcessingStatus.user_id == user.user_id
-        ).order_by(models.ProcessingStatus.created_at.desc()).first()
-
-        if not status:
-            return {
-                "file_id": file_id,
-                "status": "not_started",
-                "cards_count": 0
-            }
-
-        return {
-            "file_id": file_id,
-            "status": status.status,
-            "cards_count": status.cards_count
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.get("/cards/{file_id}")
 async def get_cards(
         file_id: int,
@@ -234,34 +205,6 @@ async def get_cards(
                 for card in flashcards
             ],
             "total": len(flashcards)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/user-cards")  # ← Без /api/pdf/
-async def get_user_cards(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Получить все карточки пользователя"""
-    try:
-        flashcards = crud.get_user_flashcards(db, user.user_id)
-
-        return {
-            "success": True,
-            "total": len(flashcards),
-            "cards": [
-                {
-                    "id": card.id,
-                    "pdf_file_id": card.pdf_file_id,
-                    "question": card.question,
-                    "answer": card.answer,
-                    "source": card.source,
-                    "created_at": card.created_at.isoformat()
-                }
-                for card in flashcards
-            ]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

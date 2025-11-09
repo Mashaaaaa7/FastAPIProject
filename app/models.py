@@ -28,20 +28,6 @@ class PDFFile(Base):
     user = relationship("User", back_populates="pdf_files")
     flashcards = relationship("Flashcard", back_populates="pdf_file", cascade="all, delete-orphan")
 
-class ProcessingStatus(Base):
-    __tablename__ = "processing_status"
-
-    id = Column(Integer, primary_key=True)
-    pdf_file_id = Column(Integer, ForeignKey('pdf_files.id', ondelete='CASCADE'), nullable=False)
-    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
-    status = Column(String, default="processing")  # processing, completed, failed
-    cards_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    pdf_file = relationship("PDFFile")
-
-
 class Flashcard(Base):
     __tablename__ = "flashcards"
 

@@ -40,14 +40,6 @@ def get_flashcards_by_pdf(db: Session, pdf_file_id: int, user_id: int):
         models.Flashcard.user_id == user_id
     ).all()
 
-
-def get_user_flashcards(db: Session, user_id: int):
-    """Получает все карточки пользователя"""
-    return db.query(models.Flashcard).filter(
-        models.Flashcard.user_id == user_id
-    ).all()
-
-
 def delete_flashcards_by_pdf(db: Session, pdf_file_id: int):
     """Удаляет карточки по PDF файлу"""
     db.query(models.Flashcard).filter(

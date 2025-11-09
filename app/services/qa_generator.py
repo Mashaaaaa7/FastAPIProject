@@ -5,9 +5,9 @@ from transformers import pipeline
 import pdfplumber
 import torch
 
+
 class QAGenerator:
     def __init__(self, use_gpt: bool = False, model_name: str = "cointegrated/rut5-base-multitask"):
-        # Device
         self.device = 0 if torch.cuda.is_available() else -1
         self.use_gpt = use_gpt
         print("⏳ Загружаю русскую модель...")
@@ -98,20 +98,16 @@ class QAGenerator:
 
     def _clean_question(self, text: str) -> str:
         """Очищает вопрос от мусора"""
-        # Удаляем промпты в начале
         text = re.sub(r'^напишите вопрос.*?:\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^вопрос.*?:\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^на основе.*?:\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^создайте.*?:\s*', '', text, flags=re.IGNORECASE)
 
-        # Убираем мусор в конце
         text = text.rstrip('.,;:')
 
-        # Капитализируем
         if text:
             text = text[0].upper() + text[1:].lower()
 
-        # Добавляем ?
         if text and not text.endswith('?'):
             text += '?'
 
@@ -121,8 +117,6 @@ class QAGenerator:
         """Генерирует вопрос через RuT5"""
         try:
             text_sample = answer[:250]
-
-            # ЛУЧШИЙ ПРОМПТ
             prompt = f"Создайте вопрос к тексту: {text_sample}"
 
             result = self.generator(
@@ -135,7 +129,6 @@ class QAGenerator:
             question = self.clean_text(result[0]['generated_text']).strip()
             question = self._clean_question(question)
 
-            # Проверяем качество
             if (15 < len(question) < 120 and '?' in question and
                     not question.lower().startswith('напишите') and
                     not question.lower().startswith('создайте')):
@@ -147,13 +140,17 @@ class QAGenerator:
             return None
 
     def _generate_universal_question(self, answer: str) -> str:
-        """Fallback: шаблоны вопросов"""
+        """Улучшенный fallback"""
         words = answer.split()
         answer_lower = answer.lower()
 
-        bad_words = {'это', 'для', 'при', 'как', 'что', 'в', 'по', 'на', 'с', 'и', 'или', 'то',
-                     'был', 'была', 'были', 'быть', 'являются', 'является', 'есть', 'имели',
-                     'имеют', 'находится', 'находились', 'важный', 'важная', 'главный', 'новый'}
+        bad_words = {
+            'это', 'для', 'при', 'как', 'что', 'в', 'по', 'на', 'с', 'и', 'или', 'то',
+            'был', 'была', 'были', 'быть', 'являются', 'является', 'есть', 'имели',
+            'имеют', 'находится', 'находились', 'важный', 'важная', 'главный', 'новый',
+            'процесс', 'великого', 'например', 'несмотря', 'главные', 'местное',
+            'влияние', 'административное', 'уезды', 'екатерины', 'система', 'реформа'
+        }
 
         idx = 0
         while idx < len(words) and words[idx].lower() in bad_words:
@@ -161,15 +158,15 @@ class QAGenerator:
 
         remaining_words = words[idx:]
 
-        for w in remaining_words[:12]:
+        key_phrase = None
+        for w in remaining_words[:15]:
             w_lower = w.lower().rstrip(',:;.')
-            if (len(w_lower) > 4 and w[0].isupper() and w_lower not in bad_words and
-                    not w_lower.endswith('ом') and not w_lower.endswith('ый') and
-                    not w_lower.endswith('ой')):
+            if (len(w_lower) > 5 and w[0].isupper() and w_lower not in bad_words):
                 key_phrase = w_lower
                 break
-        else:
-            key_phrase = "процесс"
+
+        if not key_phrase:
+            return None
 
         if any(word in answer_lower for word in ['оказала', 'привел', 'вызва']):
             return f"Какое воздействие имел {key_phrase}?"
@@ -177,33 +174,78 @@ class QAGenerator:
             return f"Как происходило развитие {key_phrase}?"
         elif any(word in answer_lower for word in ['привела', 'послужила', 'способствова']):
             return f"Какие факторы способствовали {key_phrase}?"
-        elif any(word in answer_lower for word in ['играла', 'выполня', 'служила']):
+        elif any(word in answer_lower for word in ['играла', 'выполня', 'служила', 'роль']):
             return f"Какую роль выполнял {key_phrase}?"
         elif any(word in answer_lower for word in ['содержит', 'включает']):
             return f"Из чего состоит {key_phrase}?"
-        else:
-            return f"Объясните, что такое {key_phrase}?"
+        elif any(word in answer_lower for word in ['представляет', 'явлением']):
+            return f"Что такое {key_phrase}?"
+        elif any(word in answer_lower for word in ['ввел', 'введен', 'подписать']):
+            return f"Что сделал {key_phrase}?"
+
+        return None
 
     def _is_corrupted_text(self, text: str) -> bool:
         """Проверяет, не повреждён ли текст"""
-        # Проверяем на мусор
         if any(pattern in text for pattern in [
             'znp', 'Zogitp', 'modelnp', 'znà', 'sà', 'ру=о', 'nоrистической'
         ]):
             return True
 
-        # Проверяем на слишком много символов = или ?
         if text.count('=') > 2 or text.count('?') > 1:
             return True
 
-        # Проверяем на кириллицу + латиницу в одном слове
         if re.search(r'[а-яА-Я][a-zA-Z]|[a-zA-Z][а-яА-Я]', text):
             return True
 
         return False
 
+    def _is_valid_question(self, question: str) -> bool:
+        """Проверяет валидность вопроса"""
+        if not question or not question.endswith('?'):
+            return False
+
+        if len(question) < 12 or len(question) > 150:
+            return False
+
+        words = question.split()
+        if len(words) < 3:
+            return False
+
+        # ❌ НОВЫЙ ФИЛЬТР: обнаруживаем копирование текста
+        # Если вопрос начинается с "В ", "Из ", "На " и дальше идёт много текста + "?"
+        # это скорее всего копирование, а не вопрос
+
+        bad_patterns = [
+            r'^в обмен на.*\?$',  # "В обмен на..."
+            r'^в первые.*\?$',  # "В первые года..."
+            r'^из.*\?$',  # "Из даточных..."
+            r'^на.*\?$',  # "На зиму..."
+        ]
+
+        for pattern in bad_patterns:
+            if re.search(pattern, question.lower()):
+                return False
+
+        # ✅ ПРАВИЛЬНЫЕ вопросы должны начинаться с:
+        good_starts = ['что', 'как', 'какой', 'какие', 'кто', 'где', 'когда', 'почему', 'зачем', 'чем', 'из чего']
+
+        first_word = words[0].lower().rstrip('?,.:;')
+        if not first_word in good_starts:
+            # Может быть это не-русский вопрос, пропускаем
+            return False
+
+        # Остальные проверки
+        if re.search(r'что сделал[а]? (управлений?|период|система|революц)\?', question, re.IGNORECASE):
+            return False
+
+        if 'оказал' in question.lower() and 'период' in question.lower():
+            return False
+
+        return True
+
     def generate_qa_pair(self, context: str) -> Dict:
-        """Генерирует QA с фильтрацией мусора"""
+        """Генерирует QA пару с полной фильтрацией"""
         try:
             context_clean = self.clean_text(context[:700])
             context_clean = re.sub(r'\s+', ' ', context_clean).strip()
@@ -211,12 +253,10 @@ class QAGenerator:
             if len(context_clean) < 120:
                 return None
 
-            # Проверяем на повреждённый текст ИЗ PDF
             if self._is_corrupted_text(context_clean):
                 return None
 
-            if any(word in context_clean.lower() for word in
-                   ['код', 'import', 'def ', 'print(', 'function', 'class ']):
+            if any(word in context_clean.lower() for word in ['код', 'import', 'def ']):
                 return None
 
             sentences = [s.strip() for s in re.split(r'[.!?]+', context_clean)]
@@ -229,11 +269,10 @@ class QAGenerator:
 
             question = self._generate_question_rut5(answer)
 
-            # Fallback
             if not question:
                 question = self._generate_universal_question(answer)
 
-            if not question:
+            if not question or not self._is_valid_question(question):
                 return None
 
             answer = re.sub(r'\s+', ' ', answer).strip()

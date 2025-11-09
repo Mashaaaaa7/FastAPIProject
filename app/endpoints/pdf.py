@@ -4,7 +4,7 @@ import uuid
 from app.auth import get_current_user
 from app.models import User, PDFFile
 from app.database import SessionLocal, get_db
-from app import crud
+from app import crud, models
 from app.services.qa_generator import QAGenerator
 import os
 import sys
@@ -94,7 +94,6 @@ def process_pdf_background(file_id: int, file_path: str, filename: str, user_id:
     finally:
         db.close()
 
-
 @router.post("/process-pdf/{file_id}")
 async def process_pdf(
         file_id: int,
@@ -110,10 +109,19 @@ async def process_pdf(
         ).first()
 
         if not pdf_file:
-            raise HTTPException(status_code=404, detail=f"PDF file with ID {file_id} not found")
+            raise HTTPException(status_code=404, detail="PDF not found")
 
         if not os.path.exists(pdf_file.file_path):
-            raise HTTPException(status_code=404, detail="File deleted from disk")
+            raise HTTPException(status_code=404, detail="File deleted")
+
+        # Создаём запись о статусе
+        status_record = models.ProcessingStatus(
+            pdf_file_id=file_id,
+            user_id=user.user_id,
+            status="processing"
+        )
+        db.add(status_record)
+        db.commit()
 
         background_tasks.add_task(
             process_pdf_background,
@@ -121,17 +129,78 @@ async def process_pdf(
             file_path=pdf_file.file_path,
             filename=pdf_file.file_name,
             user_id=user.user_id,
-            max_cards=max_cards
+            max_cards=max_cards,
+            status_id=status_record.id
         )
 
         return {
             "file_id": file_id,
-            "message": "🔄 Генерация карточек началась. Проверьте результат через /api/pdf/cards/{file_id}",
+            "message": "🔄 Генерация началась",
             "status": "processing"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+def process_pdf_background(file_id: int, file_path: str, filename: str, user_id: int, max_cards: int, status_id: int):
+    """Генерирует карточки в фоне"""
+    db = SessionLocal()
+    try:
+        qa_gen = get_qa_generator()
+        flashcards = qa_gen.process_pdf(file_path, max_cards)
+
+        crud.save_flashcards(db, file_id, user_id, flashcards)
+
+        # Обновляем статус
+        status = db.query(models.ProcessingStatus).filter(
+            models.ProcessingStatus.id == status_id
+        ).first()
+        if status:
+            status.status = "completed"
+            status.cards_count = len(flashcards)
+            db.commit()
+
+        print(f"✅ Карточки для {filename} готовы! Создано: {len(flashcards)}")
+    except Exception as e:
+        # Обновляем статус на failed
+        status = db.query(models.ProcessingStatus).filter(
+            models.ProcessingStatus.id == status_id
+        ).first()
+        if status:
+            status.status = "failed"
+            db.commit()
+        print(f"❌ Ошибка: {e}")
+    finally:
+        db.close()
+
+
+@router.get("/status/{file_id}")
+async def get_status(
+        file_id: int,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Получить статус обработки"""
+    try:
+        status = db.query(models.ProcessingStatus).filter(
+            models.ProcessingStatus.pdf_file_id == file_id,
+            models.ProcessingStatus.user_id == user.user_id
+        ).order_by(models.ProcessingStatus.created_at.desc()).first()
+
+        if not status:
+            return {
+                "file_id": file_id,
+                "status": "not_started",
+                "cards_count": 0
+            }
+
+        return {
+            "file_id": file_id,
+            "status": status.status,
+            "cards_count": status.cards_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/cards/{file_id}")
 async def get_cards(

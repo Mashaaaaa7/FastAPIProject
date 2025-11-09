@@ -210,7 +210,7 @@ async def get_cards(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/history")  # ← Без /api/pdf/
+@router.get("/history")
 async def get_history(
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
@@ -236,7 +236,7 @@ async def get_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/delete-file/{file_id}")  # ← Без /api/pdf/
+@router.delete("/delete-file/{file_id}")
 async def delete_pdf(
         file_id: int,
         user: User = Depends(get_current_user),

@@ -7,22 +7,16 @@ import torch
 
 
 class QAGenerator:
-    def __init__(self, use_ollama: bool = False):
+    def __init__(self):
         self.device = 0 if torch.cuda.is_available() else -1
-        self.use_ollama = use_ollama
-
-        if use_ollama:
-            print("⏳ Используем Ollama...")
-            self.ollama_url = "http://localhost:11434/api/generate"
-        else:
-            print("⏳ Загружаю русскую модель...")
-            self.generator = pipeline(
-                "text2text-generation",
-                model="cointegrated/rut5-base-multitask",
-                device=self.device,
-                torch_dtype=torch.float32
-            )
-            print("✅ Модель загружена!")
+        print("⏳ Загружаю русскую модель...")
+        self.generator = pipeline(
+            "text2text-generation",
+            model="cointegrated/rut5-base-multitask",
+            device=self.device,
+            torch_dtype=torch.float32
+        )
+        print("✅ Модель загружена!")
 
     def clean_text(self, text: str) -> str:
         """Очищает текст от артефактов"""
@@ -32,30 +26,6 @@ class QAGenerator:
         text = re.sub(r'[>~<•»«„"\[\]{}()_\-–—]+', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
-
-    def extract_key_entities(self, text: str) -> List[str]:
-        """Извлекает ключевые сущности"""
-        words = text.split()
-        entities = []
-
-        for word in words:
-            clean_word = re.sub(r'[,.!?;:]+$', '', word)
-
-            if (len(clean_word) > 4 and
-                    clean_word[0].isupper() and
-                    clean_word not in ['В', 'По', 'От', 'На', 'С', 'И', 'Что']):
-                entities.append(clean_word)
-
-        return list(set(entities))[:5]
-
-    def extract_summary(self, text: str) -> str:
-        """Извлекает суть текста"""
-        sentences = re.split(r'[.!?]+', text)
-        long_sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-
-        if long_sentences:
-            return self.clean_text(long_sentences[0])
-        return self.clean_text(text[:150])
 
     def extract_meaningful_text(self, file_path: str) -> List[Dict]:
         """Извлекает осмысленные фрагменты"""
@@ -73,7 +43,6 @@ class QAGenerator:
                     if len(text) < 100:
                         continue
 
-                    # Удаляем шумные префиксы (даты, номера, технические данные)
                     text = re.sub(r'^\d{2}\.\d{2}\.\d{4}.*?Colab\s*', '', text)
                     text = re.sub(r'https?://[^\s]+', '', text)
                     text = re.sub(r'\d{4}.*?ipynb.*?Colab', '', text, flags=re.IGNORECASE)
@@ -81,11 +50,9 @@ class QAGenerator:
                     paragraphs = [p.strip() for p in text.split('\n') if len(p.strip()) > 50]
 
                     for para in paragraphs:
-                        # Разбиваем на СМЫСЛОВЫЕ куски (не просто по точкам)
                         chunks_from_para = self._split_into_chunks(para)
                         chunks.extend(chunks_from_para)
 
-            # Фильтруем откровенный мусор
             chunks = [c for c in chunks if not any(
                 bad in c['text'].lower() for bad in ['ipynb', 'colab', 'http', '©', '®']
             )]
@@ -99,11 +66,8 @@ class QAGenerator:
     def _split_into_chunks(self, text: str) -> List[Dict]:
         """Разбивает текст на смысловые куски"""
         chunks = []
-
-        # Разбиваем по точкам, но сохраняем длину
         sentences = re.split(r'[.!?]+\s+', text)
 
-        # Объединяем короткие предложения в одно
         combined = []
         current = ""
 
@@ -114,67 +78,126 @@ class QAGenerator:
 
             current += sent + ". "
 
-            # Если накопилось достаточно — сохраняем
-            if len(current.split()) >= 12:  # Минимум 12 слов
+            if len(current.split()) >= 12:
                 combined.append(current.strip())
                 current = ""
 
         if current.strip():
             combined.append(current.strip())
 
-        # Преобразуем в chunks
-        for i, chunk_text in enumerate(combined):
-            if len(chunk_text) > 50:  # Минимум 50 символов
+        for chunk_text in combined:
+            if len(chunk_text) > 60:
                 chunks.append({
                     "text": chunk_text,
-                    "page": 0,  # Не важно для нас
+                    "page": 0,
                     "word_count": len(chunk_text.split())
                 })
 
         return chunks
 
-    def generate_qa_pair_rut5(self, context: str) -> Dict:
-        """Генерирует реальные QA пары"""
-        try:
-            context_clean = self.clean_text(context[:500])
+    def _extract_key_phrase(self, text: str) -> str:
+        """Извлекает главное существительное из текста"""
+        words = text.split()
 
-            # Удаляем цифры и шум
+        # Стоп-слова и прилагательные
+        bad_words = {
+            'это', 'для', 'при', 'как', 'что', 'в', 'по', 'на', 'с', 'и', 'или', 'то',
+            'был', 'была', 'были', 'быть', 'являются', 'является', 'есть',
+            'если', 'здесь', 'наконец', 'однако', 'рассматривая', 'выделение',
+            'предисловие', 'обучение', 'набор'
+        }
+
+        idx = 0
+        while idx < len(words) and words[idx].lower() in bad_words:
+            idx += 1
+
+        working_words = words[idx:]
+
+        # Ищем существительное (слово с заглавной буквы, длина > 5)
+        for w in working_words[:10]:
+            w_lower = w.lower().rstrip(',:;.')
+            if len(w_lower) > 5 and w[0].isupper() and w_lower not in bad_words:
+                return w_lower
+
+        # Fallback
+        return "концепция"
+
+    def _generate_question(self, text: str) -> str:
+        """Генерирует УМНЫЙ вопрос на основе анализа текста"""
+        text_lower = text.lower()
+        key_phrase = self._extract_key_phrase(text)
+
+        # Анализируем содержание и генерируем подходящий вопрос
+
+        if any(word in text_lower for word in ['представить', 'вводит', 'рассмотрены']):
+            return f"Что представляет собой {key_phrase}?"
+
+        elif any(word in text_lower for word in ['обучения', 'алгоритм', 'методы', 'подход']):
+            return f"Как работает {key_phrase}?"
+
+        elif any(word in text_lower for word in ['применени', 'использова', 'применяет']):
+            return f"Где применяется {key_phrase}?"
+
+        elif any(word in text_lower for word in ['рассмотр', 'обсужда', 'анализир']):
+            return f"Какие особенности имеет {key_phrase}?"
+
+        elif any(word in text_lower for word in ['содержит', 'включает', 'состоит']):
+            return f"Из чего состоит {key_phrase}?"
+
+        elif any(word in text_lower for word in ['может', 'помогает', 'способствует']):
+            return f"Какая функция у {key_phrase}?"
+
+        elif any(word in text_lower for word in ['данные', 'информация', 'результаты']):
+            return f"Как интерпретировать {key_phrase}?"
+
+        elif any(word in text_lower for word in ['процесс', 'этапы', 'шаги']):
+            return f"Какие этапы содержит процесс {key_phrase}?"
+
+        else:
+            return f"Объясните, что такое {key_phrase}?"
+
+    def generate_qa_pair(self, context: str) -> Dict:
+        """Генерирует качественную QA пару"""
+        try:
+            context_clean = self.clean_text(context[:700])
             context_clean = re.sub(r'\b\d{1,3}\b', '', context_clean)
             context_clean = re.sub(r'\s+', ' ', context_clean).strip()
 
-            if len(context_clean) < 60:
+            if len(context_clean) < 100:
                 return None
 
-            # Разбиваем на предложения
+            if any(word in context_clean.lower() for word in
+                   ['код', 'import', 'def ', 'print(', 'function', 'class ']):
+                return None
+
+            # Выбираем лучшие предложения
             sentences = [s.strip() for s in re.split(r'[.!?]+', context_clean)]
-            long_sentences = [s for s in sentences if len(s.split()) >= 8]
+            candidate_sents = [s for s in sentences if len(s.split()) >= 12 and len(s) > 90]
 
-            if not long_sentences:
+            if not candidate_sents:
                 return None
 
-            sentence = long_sentences[0]
-            words = [w for w in sentence.split() if len(w) > 3]
+            # Пропускаем вводные фразы
+            answer = None
+            for sent in candidate_sents:
+                if not any(marker in sent.lower() for marker in
+                           ['номер', 'тема', 'раздел', 'глава', 'таблица', 'рисунок']):
+                    answer = sent
+                    break
 
-            if len(words) < 5:
-                return None
+            if not answer:
+                answer = candidate_sents[0]
 
-            # Ищем РЕАЛЬНОЕ ключевое слово (существительное)
-            important_words = [
-                w.lower() for w in words
-                if w[0].isupper() and w.lower() not in
-                   ['где', 'когда', 'какой', 'какая', 'какие', 'это', 'эта']
-            ]
+            # Генерируем вопрос
+            question = self._generate_question(answer)
 
-            if not important_words:
-                return None
+            answer = re.sub(r'\s+', ' ', answer).strip()
+            question = re.sub(r'\s+', ' ', question).strip()
 
-            key_term = important_words[0]
-            question = f"Объясните, что такое {key_term}?"
-            answer = sentence
-
-            if (len(question) > 15 and
-                    len(answer) > 50 and
-                    key_term in answer.lower()):
+            # Проверяем качество
+            if (len(question) > 12 and len(answer) > 90 and
+                    '?' in question and
+                    len(question) < 120):
                 return {
                     "question": question,
                     "answer": answer,
@@ -182,46 +205,13 @@ class QAGenerator:
                 }
 
             return None
+
         except Exception as e:
-            print(f"⚠️ Ошибка: {e}")
-            return None
-
-    def create_quality_fallback(self, context: str) -> Dict:
-        """Fallback — берём целое предложение как есть"""
-        try:
-            context_clean = self.clean_text(context[:500])
-
-            # Ищем хорошее предложение
-            sentences = [s.strip() for s in re.split(r'[.!?]+', context_clean)
-                         if len(s.strip()) > 50]
-
-            if not sentences:
-                return None
-
-            sentence = sentences[0]
-            words = sentence.split()
-
-            if len(words) < 7:
-                return None
-
-            # Берём первое-второе слово как тему
-            topic = ' '.join(words[:2]).lower()
-
-            question = f"Объясните, что произойдёт, если {topic}?"
-            answer = sentence
-
-            if len(answer) > 40:
-                return {
-                    "question": question,
-                    "answer": answer,
-                    "context": context_clean[:120]
-                }
-
-            return None
-        except:
+            print(f"⚠️ Ошибка генерации: {e}")
             return None
 
     def process_pdf(self, file_path: str, max_cards: int = 10) -> List[Dict]:
+        """Обрабатывает PDF и генерирует карточки"""
         print(f"\n🔄 Начинаю обработку {file_path}...")
         print(f"🎯 Цель: {max_cards} карточек")
 
@@ -240,7 +230,7 @@ class QAGenerator:
             if len(flashcards) >= max_cards:
                 break
 
-            qa_pair = self.generate_qa_pair_rut5(chunk['text'])
+            qa_pair = self.generate_qa_pair(chunk['text'])
 
             if qa_pair:
                 flashcard = {
@@ -252,17 +242,6 @@ class QAGenerator:
                 }
                 flashcards.append(flashcard)
                 print(f"  ✅ [{len(flashcards)}] {qa_pair['question'][:60]}...")
-            else:
-                fallback_qa = self.create_quality_fallback(chunk['text'])
-                flashcard = {
-                    "id": len(flashcards) + 1,
-                    "question": fallback_qa["question"],
-                    "answer": fallback_qa["answer"],
-                    "context": fallback_qa["context"],
-                    "source": f"Page {chunk['page']}"
-                }
-                flashcards.append(flashcard)
-                print(f"  🔄 [{len(flashcards)}] {fallback_qa['question'][:60]}...")
 
         print(f"✅ Создано {len(flashcards)} карточек")
         return flashcards

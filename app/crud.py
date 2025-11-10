@@ -57,7 +57,7 @@ def add_action(db: Session, action: str, filename: str, user_id: int, details: s
         record = models.ActionHistory(
             action=action,
             filename=filename,
-            details=details,  # ← ЭТА СТРОКА
+            details=details,
             user_id=user_id
         )
         db.add(record)
@@ -70,6 +70,7 @@ def add_action(db: Session, action: str, filename: str, user_id: int, details: s
 
 def get_history(db: Session, user_id: int):
     """Получает историю действий пользователя"""
-    return db.query(models.ActionHistory).filter(
-        models.ActionHistory.user_id == user_id
-    ).order_by(models.ActionHistory.created_at.desc()).all()
+    return db.query(models.ActionHistory)\
+        .filter(models.ActionHistory.user_id == user_id)\
+        .order_by(models.ActionHistory.id.asc())\
+        .all()

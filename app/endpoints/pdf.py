@@ -13,6 +13,7 @@ router = APIRouter()
 
 qa_generator = None
 
+
 def get_qa_generator():
     global qa_generator
     if qa_generator is None:
@@ -22,12 +23,15 @@ def get_qa_generator():
     return qa_generator
 
 
+# ============================================================================
+# ✅ ENDPOINT 1: Upload PDF
+# ============================================================================
 @router.post("/upload-pdf")
 async def upload_pdf(
         file: UploadFile = File(...),
-        user: User = Depends(get_current_user)
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)  # ✅ Use dependency injection
 ):
-    db = SessionLocal()
     try:
         folder = f"uploads/{user.user_id}/"
         os.makedirs(folder, exist_ok=True)
@@ -68,18 +72,37 @@ async def upload_pdf(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
 
 
-def process_pdf_background(file_id: int, file_path: str, filename: str, user_id: int, max_cards: int):
-    """Генерирует и сохраняет карточки в фоне"""
+# ============================================================================
+# ✅ BACKGROUND FUNCTION - Only ONE definition! (with status_id)
+# ============================================================================
+def process_pdf_background(
+        file_id: int,
+        file_path: str,
+        filename: str,
+        user_id: int,
+        max_cards: int,
+        status_id: int
+):
+    """Генерирует карточки в фоне и обновляет статус"""
     db = SessionLocal()
     try:
+        print(f"🔄 Начинаю обработку {filename}...", flush=True)
+
         qa_gen = get_qa_generator()
         flashcards = qa_gen.process_pdf(file_path, max_cards)
 
         crud.save_flashcards(db, file_id, user_id, flashcards)
+
+        # ✅ Обновляем статус на "completed"
+        status = db.query(models.ProcessingStatus).filter(
+            models.ProcessingStatus.id == status_id
+        ).first()
+        if status:
+            status.status = "completed"
+            status.cards_count = len(flashcards)
+            db.commit()
 
         crud.add_action(
             db=db,
@@ -88,21 +111,41 @@ def process_pdf_background(file_id: int, file_path: str, filename: str, user_id:
             details=f"Created {len(flashcards)} flashcards",
             user_id=user_id
         )
-        print(f"✅ Карточки для {filename} сохранены в БД! Создано: {len(flashcards)}")
+
+        print(f"✅ Карточки для {filename} готовы! Создано: {len(flashcards)}", flush=True)
+
     except Exception as e:
-        print(f"❌ Ошибка при обработке {filename}: {e}")
+        print(f"❌ Ошибка при обработке {filename}: {e}", flush=True)
+
+        # ✅ Обновляем статус на "failed"
+        try:
+            status = db.query(models.ProcessingStatus).filter(
+                models.ProcessingStatus.id == status_id
+            ).first()
+            if status:
+                status.status = "failed"
+                db.commit()
+        except Exception as e2:
+            print(f"❌ Не смог обновить статус: {e2}")
+
     finally:
         db.close()
 
+
+# ============================================================================
+# ✅ ENDPOINT 2: START PROCESSING (THIS WAS MISSING!)
+# ============================================================================
 @router.post("/process-pdf/{file_id}")
 async def process_pdf(
         file_id: int,
         max_cards: int = Query(10, ge=1, le=100),
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
-        background_tasks: BackgroundTasks = BackgroundTasks()
+        background_tasks: BackgroundTasks = BackgroundTasks()  # ✅ USE THIS!
 ):
+    """Запускает обработку PDF в фоне"""
     try:
+        # Проверяем, что файл существует и принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id
@@ -112,9 +155,9 @@ async def process_pdf(
             raise HTTPException(status_code=404, detail="PDF not found")
 
         if not os.path.exists(pdf_file.file_path):
-            raise HTTPException(status_code=404, detail="File deleted")
+            raise HTTPException(status_code=404, detail="File deleted or moved")
 
-        # Создаём запись о статусе
+        # ✅ Создаём запись о статусе обработки
         status_record = models.ProcessingStatus(
             pdf_file_id=file_id,
             user_id=user.user_id,
@@ -122,6 +165,7 @@ async def process_pdf(
         )
         db.add(status_record)
         db.commit()
+        db.refresh(status_record)
 
         background_tasks.add_task(
             process_pdf_background,
@@ -135,50 +179,72 @@ async def process_pdf(
 
         return {
             "file_id": file_id,
-            "message": "🔄 Генерация началась",
+            "message": "🔄 Генерация карточек началась в фоне",
             "status": "processing"
         }
+
+    except HTTPException:
+        raise  # Re-raise HTTPException
+    except Exception as e:
+        print(f"❌ Ошибка при запуске обработки: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ✅ ENDPOINT 3: Get Processing Status (to check if done)
+# ============================================================================
+@router.get("/processing-status/{file_id}")
+async def check_processing_status(
+        file_id: int,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Проверяет статус обработки PDF"""
+    try:
+        # Проверяем, что файл принадлежит пользователю
+        pdf_file = db.query(PDFFile).filter(
+            PDFFile.id == file_id,
+            PDFFile.user_id == user.user_id
+        ).first()
+
+        if not pdf_file:
+            raise HTTPException(status_code=404, detail="PDF not found")
+
+        # Получаем последний статус обработки
+        status = db.query(models.ProcessingStatus).filter(
+            models.ProcessingStatus.pdf_file_id == file_id,
+            models.ProcessingStatus.user_id == user.user_id
+        ).order_by(models.ProcessingStatus.created_at.desc()).first()
+
+        if not status:
+            return {
+                "success": True,
+                "status": "not_started",
+                "cards_count": 0
+            }
+
+        return {
+            "success": True,
+            "status": status.status,  # "processing", "completed", "failed"
+            "cards_count": status.cards_count or 0,
+            "created_at": status.created_at.isoformat()
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def process_pdf_background(file_id: int, file_path: str, filename: str, user_id: int, max_cards: int, status_id: int):
-    """Генерирует карточки в фоне"""
-    db = SessionLocal()
-    try:
-        qa_gen = get_qa_generator()
-        flashcards = qa_gen.process_pdf(file_path, max_cards)
-
-        crud.save_flashcards(db, file_id, user_id, flashcards)
-
-        # Обновляем статус
-        status = db.query(models.ProcessingStatus).filter(
-            models.ProcessingStatus.id == status_id
-        ).first()
-        if status:
-            status.status = "completed"
-            status.cards_count = len(flashcards)
-            db.commit()
-
-        print(f"✅ Карточки для {filename} готовы! Создано: {len(flashcards)}")
-    except Exception as e:
-        # Обновляем статус на failed
-        status = db.query(models.ProcessingStatus).filter(
-            models.ProcessingStatus.id == status_id
-        ).first()
-        if status:
-            status.status = "failed"
-            db.commit()
-        print(f"❌ Ошибка: {e}")
-    finally:
-        db.close()
-
+# ============================================================================
+# ✅ ENDPOINT 4: Get Generated Cards
+# ============================================================================
 @router.get("/cards/{file_id}")
 async def get_cards(
         file_id: int,
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
+    """Получает сгенерированные карточки"""
     try:
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
@@ -206,15 +272,53 @@ async def get_cards(
             ],
             "total": len(flashcards)
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# ✅ ENDPOINT 5: List User's PDFs
+# ============================================================================
+@router.get("/pdfs")
+async def list_user_pdfs(
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Получает активные PDF """
+    try:
+        # файлы где is_deleted = False
+        pdf_files = db.query(PDFFile).filter(
+            PDFFile.user_id == user.user_id,
+            PDFFile.is_deleted == False
+        ).all()
+
+        return {
+            "success": True,
+            "pdfs": [
+                {
+                    "id": pdf.id,
+                    "name": pdf.file_name,
+                    "file_size": os.path.getsize(pdf.file_path) if os.path.exists(pdf.file_path) else 0
+                }
+                for pdf in pdf_files
+            ],
+            "total": len(pdf_files)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ✅ ENDPOINT 6: Get Action History
+# ============================================================================
 @router.get("/history")
 async def get_history(
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
+    """Получает историю действий пользователя"""
     try:
         actions = crud.get_history(db, user.user_id)
         history_data = [
@@ -223,7 +327,8 @@ async def get_history(
                 "action": action.action,
                 "filename": action.filename or "unknown",
                 "created_at": action.created_at.isoformat(),
-                "details": action.details or f"{action.action} file"
+                "details": action.details or f"{action.action} file",
+                "timestamp": action.created_at.isoformat()  # ✅ Include both field names for compatibility
             }
             for action in actions
         ]
@@ -236,45 +341,39 @@ async def get_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# ✅ ENDPOINT 7: Delete PDF and Cards
+# ============================================================================
 @router.delete("/delete-file/{file_id}")
 async def delete_pdf(
         file_id: int,
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
+    """✅ МЯГКОЕ удаление - помечает как удалённый, БД не трогаем"""
     try:
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
-            PDFFile.user_id == user.user_id
+            PDFFile.user_id == user.user_id,
+            PDFFile.is_deleted == False
         ).first()
 
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        crud.delete_flashcards_by_pdf(db, file_id)
-
-        if os.path.exists(pdf_file.file_path):
-            os.remove(pdf_file.file_path)
-
-        json_path = pdf_file.file_path.replace('.pdf', '_cards.json')
-        if os.path.exists(json_path):
-            os.remove(json_path)
-
-        db.delete(pdf_file)
+        # ✅ Помечаем как удалённый (НЕ удаляем из БД!)
+        pdf_file.is_deleted = True
         db.commit()
 
-        crud.add_action(
-            db=db,
-            action="delete",
-            filename=pdf_file.file_name,
-            details=f"Deleted file {pdf_file.file_name}",
-            user_id=user.user_id
-        )
+        print(f"🗑️ File {pdf_file.file_name} marked as deleted (is_deleted=True)")
 
         return {
             "success": True,
-            "message": f"File {pdf_file.file_name} and all cards deleted"
+            "message": f"File {pdf_file.file_name} deleted"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
+        print(f"❌ ERROR in delete_pdf: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

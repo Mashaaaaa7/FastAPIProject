@@ -1,16 +1,20 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import declarative_base, relationship
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 Base = declarative_base()
 
+# Московское время (UTC+3)
+MSK = timezone(timedelta(hours=3))
+
+def get_msk_time():
+    return datetime.now(MSK)
+
 class User(Base):
     __tablename__ = "users"
-
     user_id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
     pdf_files = relationship("PDFFile", back_populates="user", cascade="all, delete-orphan")
     flashcards = relationship("Flashcard", back_populates="user", cascade="all, delete-orphan")
@@ -23,7 +27,8 @@ class PDFFile(Base):
     file_name = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=False)
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=get_msk_time)
 
     user = relationship("User", back_populates="pdf_files")
     flashcards = relationship("Flashcard", back_populates="pdf_file", cascade="all, delete-orphan")
@@ -38,7 +43,8 @@ class Flashcard(Base):
     answer = Column(Text, nullable=False)
     context = Column(Text)
     source = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # ✅ ДОБАВЛЕНА
+    created_at = Column(DateTime, default=get_msk_time)
 
     pdf_file = relationship("PDFFile", back_populates="flashcards")
     user = relationship("User", back_populates="flashcards")
@@ -51,7 +57,8 @@ class ActionHistory(Base):
     filename = Column(String(255))
     details = Column(Text)
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # ✅ ДОБАВЛЕНА
+    created_at = Column(DateTime, default=get_msk_time)
 
     user = relationship("User", back_populates="action_history")
 
@@ -63,8 +70,11 @@ class ProcessingStatus(Base):
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
     status = Column(String, default="processing")
     cards_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    should_cancel = Column(Boolean, default=False)
+    error_message = Column(Text, nullable=True)
+    # ✅ Московское время
+    created_at = Column(DateTime, default=get_msk_time)
+    updated_at = Column(DateTime, default=get_msk_time, onupdate=get_msk_time)
 
     pdf_file = relationship("PDFFile")
     user = relationship("User")

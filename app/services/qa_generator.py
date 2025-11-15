@@ -4,10 +4,11 @@ from typing import List, Dict
 from transformers import pipeline
 import pdfplumber
 import torch
-
+from sqlalchemy.orm import Session
+from app import models
 
 class QAGenerator:
-    def __init__(self, use_gpt: bool = False, model_name: str = "cointegrated/rut5-base-multitask"):
+    def __init__(self, use_gpt: bool = False):
         self.device = 0 if torch.cuda.is_available() else -1
         self.use_gpt = use_gpt
         print("⏳ Загружаю русскую модель...")
@@ -102,7 +103,6 @@ class QAGenerator:
         text = re.sub(r'^вопрос.*?:\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^на основе.*?:\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^создайте.*?:\s*', '', text, flags=re.IGNORECASE)
-
         text = text.rstrip('.,;:')
 
         if text:
@@ -212,30 +212,23 @@ class QAGenerator:
         if len(words) < 3:
             return False
 
-        # ❌ НОВЫЙ ФИЛЬТР: обнаруживаем копирование текста
-        # Если вопрос начинается с "В ", "Из ", "На " и дальше идёт много текста + "?"
-        # это скорее всего копирование, а не вопрос
-
         bad_patterns = [
-            r'^в обмен на.*\?$',  # "В обмен на..."
-            r'^в первые.*\?$',  # "В первые года..."
-            r'^из.*\?$',  # "Из даточных..."
-            r'^на.*\?$',  # "На зиму..."
+            r'^в обмен на.*\?$',
+            r'^в первые.*\?$',
+            r'^из.*\?$',
+            r'^на.*\?$',
         ]
 
         for pattern in bad_patterns:
             if re.search(pattern, question.lower()):
                 return False
 
-        # ✅ ПРАВИЛЬНЫЕ вопросы должны начинаться с:
         good_starts = ['что', 'как', 'какой', 'какие', 'кто', 'где', 'когда', 'почему', 'зачем', 'чем', 'из чего']
 
         first_word = words[0].lower().rstrip('?,.:;')
         if not first_word in good_starts:
-            # Может быть это не-русский вопрос, пропускаем
             return False
 
-        # Остальные проверки
         if re.search(r'что сделал[а]? (управлений?|период|система|революц)\?', question, re.IGNORECASE):
             return False
 
@@ -291,8 +284,8 @@ class QAGenerator:
             print(f"⚠️ Ошибка: {e}")
             return None
 
-    def process_pdf(self, file_path: str, max_cards: int = 10) -> List[Dict]:
-        """Обрабатывает PDF и генерирует карточки"""
+    def process_pdf_with_cancellation(self, file_path: str, max_cards: int, db: Session, status_id: int) -> List[Dict]:
+        """Обрабатывает PDF с поддержкой отмены"""
         print(f"\n🔄 Начинаю обработку {file_path}...")
         print(f"🎯 Цель: {max_cards} карточек")
 
@@ -308,6 +301,19 @@ class QAGenerator:
         flashcards = []
 
         for chunk in chunks[:max_cards * 2]:
+            # ✅ Проверяем флаг отмены ТОЛЬКО если db не None
+            if db is not None:
+                try:
+                    status = db.query(models.ProcessingStatus).filter(
+                        models.ProcessingStatus.id == status_id
+                    ).first()
+
+                    if status and status.should_cancel:
+                        print(f"⛔ Обработка отменена пользователем")
+                        break
+                except Exception as e:
+                    print(f"⚠️ Ошибка проверки флага отмены: {e}")
+
             if len(flashcards) >= max_cards:
                 break
 
@@ -315,7 +321,6 @@ class QAGenerator:
 
             if qa_pair:
                 flashcard = {
-                    "id": len(flashcards) + 1,
                     "question": qa_pair["question"],
                     "answer": qa_pair["answer"],
                     "context": qa_pair["context"],
@@ -326,3 +331,7 @@ class QAGenerator:
 
         print(f"✅ Создано {len(flashcards)} карточек")
         return flashcards
+
+    def process_pdf(self, file_path: str, max_cards: int = 10) -> List[Dict]:
+        """Обрабатывает PDF (без отмены)"""
+        return self.process_pdf_with_cancellation(file_path, max_cards, None, None)

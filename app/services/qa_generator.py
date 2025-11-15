@@ -11,14 +11,15 @@ class QAGenerator:
     def __init__(self, use_gpt: bool = False):
         self.device = 0 if torch.cuda.is_available() else -1
         self.use_gpt = use_gpt
-        print("⏳ Загружаю русскую модель...")
+        print("⏳ Загружаю русскую модель...", flush=True)
+
         self.generator = pipeline(
             "text2text-generation",
-            model="cointegrated/rut5-base-multitask",
+            model="cointegrated/rut5-small",
             device=self.device,
             torch_dtype=torch.float32
         )
-        print("✅ Модель загружена!")
+        print("✅ Модель загружена!", flush=True)
 
     def clean_text(self, text: str) -> str:
         """Очищает текст от артефактов"""
@@ -285,9 +286,9 @@ class QAGenerator:
             return None
 
     def process_pdf_with_cancellation(self, file_path: str, max_cards: int, db: Session, status_id: int) -> List[Dict]:
-        """Обрабатывает PDF с поддержкой отмены"""
+        """Обрабатывает PDF - генерирует НЕ БОЛЬШЕ max_cards уникальных карточек"""
         print(f"\n🔄 Начинаю обработку {file_path}...")
-        print(f"🎯 Цель: {max_cards} карточек")
+        print(f"🎯 Максимум: {max_cards} карточек (не превысим этот лимит)")
 
         chunks = self.extract_meaningful_text(file_path)
 
@@ -299,9 +300,14 @@ class QAGenerator:
 
         chunks.sort(key=lambda x: abs(x['word_count'] - 25))
         flashcards = []
+        seen_questions = set()
 
-        for chunk in chunks[:max_cards * 2]:
-            # ✅ Проверяем флаг отмены ТОЛЬКО если db не None
+        for chunk in chunks:
+            if len(flashcards) >= max_cards:
+                print(f"🛑 Лимит достигнут: {len(flashcards)} = {max_cards}")
+                break
+
+            # Проверка отмены
             if db is not None:
                 try:
                     status = db.query(models.ProcessingStatus).filter(
@@ -314,22 +320,33 @@ class QAGenerator:
                 except Exception as e:
                     print(f"⚠️ Ошибка проверки флага отмены: {e}")
 
-            if len(flashcards) >= max_cards:
-                break
-
             qa_pair = self.generate_qa_pair(chunk['text'])
 
             if qa_pair:
-                flashcard = {
-                    "question": qa_pair["question"],
-                    "answer": qa_pair["answer"],
-                    "context": qa_pair["context"],
-                    "source": f"Page {chunk['page']}"
-                }
-                flashcards.append(flashcard)
-                print(f"  ✅ [{len(flashcards)}] {qa_pair['question'][:60]}...")
+                question = qa_pair["question"]
 
-        print(f"✅ Создано {len(flashcards)} карточек")
+                if question not in seen_questions:
+                    seen_questions.add(question)
+
+                    flashcard = {
+                        "question": question,
+                        "answer": qa_pair["answer"],
+                        "context": qa_pair["context"],
+                        "source": qa_pair.get("source", "")
+                    }
+                    flashcards.append(flashcard)
+                    print(f"  ✅ [{len(flashcards)}/{max_cards}] {question[:60]}...")
+
+                    if len(flashcards) >= max_cards:
+                        print(f"🛑 Лимит достигнут: {len(flashcards)} карточек")
+                        break
+
+        print(f"✅ Итого: {len(flashcards)} карточек (лимит: {max_cards})")
+
+        if len(flashcards) > max_cards:
+            print(f"⚠️ Превышен лимит! Обрезаю до {max_cards}")
+            flashcards = flashcards[:max_cards]
+
         return flashcards
 
     def process_pdf(self, file_path: str, max_cards: int = 10) -> List[Dict]:

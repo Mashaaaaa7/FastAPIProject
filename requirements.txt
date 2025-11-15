@@ -1,0 +1,9 @@
+uvicorn
+passlib
+python-jose
+pydantic
+torch
+pdfplumber
+transformers
+sqlalchemy
+fastapi

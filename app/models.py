@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timezone, timedelta
+from sqlalchemy import UniqueConstraint
 
 Base = declarative_base()
 
@@ -43,11 +44,14 @@ class Flashcard(Base):
     answer = Column(Text, nullable=False)
     context = Column(Text)
     source = Column(String)
-    # ✅ ДОБАВЛЕНА
     created_at = Column(DateTime, default=get_msk_time)
 
     pdf_file = relationship("PDFFile", back_populates="flashcards")
     user = relationship("User", back_populates="flashcards")
+
+    __table_args__ = (
+        UniqueConstraint('pdf_file_id', 'question', name='unique_pdf_question'),
+    )
 
 class ActionHistory(Base):
     __tablename__ = "action_history"
@@ -57,7 +61,6 @@ class ActionHistory(Base):
     filename = Column(String(255))
     details = Column(Text)
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
-    # ✅ ДОБАВЛЕНА
     created_at = Column(DateTime, default=get_msk_time)
 
     user = relationship("User", back_populates="action_history")
@@ -72,7 +75,6 @@ class ProcessingStatus(Base):
     cards_count = Column(Integer, default=0)
     should_cancel = Column(Boolean, default=False)
     error_message = Column(Text, nullable=True)
-    # ✅ Московское время
     created_at = Column(DateTime, default=get_msk_time)
     updated_at = Column(DateTime, default=get_msk_time, onupdate=get_msk_time)
 

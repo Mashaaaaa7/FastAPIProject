@@ -39,23 +39,22 @@ def process_pdf_background(
 ):
     """Обработка PDF в отдельном потоке с поддержкой отмены"""
 
-    # ✅ СОЗДАЁМ НОВУЮ СЕССИЮ для потока
     db = SessionLocal()
 
     try:
         print(f"🔄 Начинаю обработку {filename}...", flush=True)
         sys.stdout.flush()
 
-        # ✅ Инициализируем генератор
+        # Инициализируем генератор
         qa_gen = get_qa_generator()
 
-        # ✅ Передаём db в функцию с поддержкой отмены
+        # Передаём db в функцию с поддержкой отмены
         flashcards = qa_gen.process_pdf_with_cancellation(
             file_path, max_cards, db, status_id
         )
 
         if flashcards:
-            # ✅ Сохраняем карточки в БД
+            # Сохраняем карточки в БД
             for card_data in flashcards:
                 flashcard = models.Flashcard(
                     pdf_file_id=file_id,
@@ -72,7 +71,7 @@ def process_pdf_background(
         else:
             print(f"⚠️ Карточки не созданы для {filename}", flush=True)
 
-        # ✅ Обновляем статус обработки
+        # Обновляем статус обработки
         status = db.query(models.ProcessingStatus).filter(
             models.ProcessingStatus.id == status_id
         ).first()
@@ -112,7 +111,7 @@ def process_pdf_background(
 
 
 # ============================================================================
-# ✅ ENDPOINT 1: Upload PDF
+# ENDPOINT 1: Upload PDF
 # ============================================================================
 @router.post("/upload-pdf")
 async def upload_pdf(
@@ -122,11 +121,11 @@ async def upload_pdf(
 ):
     """Загружает PDF файл"""
     try:
-        # ✅ Создаём папку для пользователя
+        # Создаём папку для пользователя
         folder = f"uploads/{user.user_id}/"
         os.makedirs(folder, exist_ok=True)
 
-        # ✅ Сохраняем файл с уникальным именем
+        # Сохраняем файл с уникальным именем
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(folder, unique_filename)
@@ -135,7 +134,7 @@ async def upload_pdf(
         with open(file_path, "wb") as f:
             f.write(contents)
 
-        # ✅ Сохраняем в БД
+        # Сохраняем в БД
         db_file = PDFFile(
             file_name=file.filename,
             file_path=file_path,
@@ -145,7 +144,7 @@ async def upload_pdf(
         db.commit()
         db.refresh(db_file)
 
-        # ✅ Логируем действие
+        # Логируем действие
         try:
             crud.add_action(
                 db=db,
@@ -172,8 +171,9 @@ async def upload_pdf(
 
 
 # ============================================================================
-# ✅ ENDPOINT 2: Start Processing PDF
+# ENDPOINT 2: Start Processing PDF
 # ============================================================================
+
 @router.post("/process-pdf/{file_id}")
 async def process_pdf(
         file_id: int,
@@ -183,7 +183,7 @@ async def process_pdf(
 ):
     """Запускает обработку PDF в фоновом потоке"""
     try:
-        # ✅ Проверяем что файл существует и принадлежит пользователю
+        # Проверяем что файл существует и принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id,
@@ -193,7 +193,7 @@ async def process_pdf(
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        # ✅ Создаём запись статуса обработки
+        # Создаём запись статуса обработки
         status = models.ProcessingStatus(
             pdf_file_id=file_id,
             user_id=user.user_id,
@@ -205,7 +205,6 @@ async def process_pdf(
 
         print(f"🧵 Запускаю обработку файла {pdf_file.file_name} (status_id={status.id})", flush=True)
 
-        # ✅ Запускаем в ОТДЕЛЬНОМ ПОТОКЕ (НЕ требует Celery!)
         thread = threading.Thread(
             target=process_pdf_background,
             args=(
@@ -237,7 +236,7 @@ async def process_pdf(
 
 
 # ============================================================================
-# ✅ ENDPOINT 3: Check Processing Status
+# ENDPOINT 3: Check Processing Status
 # ============================================================================
 @router.get("/processing-status/{file_id}")
 async def check_processing_status(
@@ -247,7 +246,7 @@ async def check_processing_status(
 ):
     """Проверяет статус обработки PDF"""
     try:
-        # ✅ Проверяем что файл принадлежит пользователю
+        # Проверяем что файл принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id
@@ -256,7 +255,7 @@ async def check_processing_status(
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        # ✅ Получаем последний статус обработки
+        # Получаем последний статус обработки
         status = db.query(models.ProcessingStatus).filter(
             models.ProcessingStatus.pdf_file_id == file_id,
             models.ProcessingStatus.user_id == user.user_id
@@ -284,7 +283,7 @@ async def check_processing_status(
 
 
 # ============================================================================
-# ✅ ENDPOINT 4: Get Generated Cards
+# ENDPOINT 4: Get Generated Cards
 # ============================================================================
 @router.get("/cards/{file_id}")
 async def get_cards(
@@ -294,7 +293,7 @@ async def get_cards(
 ):
     """Получает сгенерированные карточки для PDF"""
     try:
-        # ✅ Проверяем что файл принадлежит пользователю
+        # Проверяем что файл принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id
@@ -303,7 +302,7 @@ async def get_cards(
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        # ✅ Получаем карточки
+        # Получаем карточки
         flashcards = crud.get_flashcards_by_pdf(db, file_id, user.user_id)
 
         return {
@@ -333,7 +332,7 @@ async def get_cards(
 
 
 # ============================================================================
-# ✅ ENDPOINT 5: List User's PDFs
+# ENDPOINT 5: List User's PDFs
 # ============================================================================
 @router.get("/pdfs")
 async def list_user_pdfs(
@@ -367,7 +366,7 @@ async def list_user_pdfs(
 
 
 # ============================================================================
-# ✅ ENDPOINT 6: Get Action History
+# ENDPOINT 6: Get Action History
 # ============================================================================
 @router.get("/history")
 async def get_history(
@@ -403,7 +402,7 @@ async def get_history(
 
 
 # ============================================================================
-# ✅ ENDPOINT 7: Delete PDF (Soft Delete)
+# ENDPOINT 7: Delete PDF (Soft Delete)
 # ============================================================================
 @router.delete("/delete-file/{file_id}")
 async def delete_pdf(
@@ -413,7 +412,7 @@ async def delete_pdf(
 ):
     """Мягкое удаление PDF - помечает как удалённый в БД, физический файл остаётся"""
     try:
-        # ✅ Проверяем что файл существует и принадлежит пользователю
+        # Проверяем что файл существует и принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id,
@@ -423,13 +422,13 @@ async def delete_pdf(
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        # ✅ Помечаем как удалённый (НЕ удаляем из БД!)
+        # Помечаем как удалённый (НЕ удаляем из БД!)
         pdf_file.is_deleted = True
         db.commit()
 
         print(f"🗑️ File {pdf_file.file_name} marked as deleted (is_deleted=True)", flush=True)
 
-        # ✅ Логируем действие
+        # Логируем действие
         try:
             crud.add_action(
                 db=db,
@@ -455,7 +454,7 @@ async def delete_pdf(
 
 
 # ============================================================================
-# ✅ ENDPOINT 8: Cancel Processing
+# ENDPOINT 8: Cancel Processing
 # ============================================================================
 @router.post("/cancel-processing/{file_id}")
 async def cancel_processing(
@@ -465,7 +464,7 @@ async def cancel_processing(
 ):
     """Отмена обработки PDF - устанавливает флаг should_cancel"""
     try:
-        # ✅ Проверяем что файл принадлежит пользователю
+        # Проверяем что файл принадлежит пользователю
         pdf_file = db.query(PDFFile).filter(
             PDFFile.id == file_id,
             PDFFile.user_id == user.user_id
@@ -474,7 +473,7 @@ async def cancel_processing(
         if not pdf_file:
             raise HTTPException(status_code=404, detail="PDF not found")
 
-        # ✅ Получаем текущий статус обработки
+        # Получаем текущий статус обработки
         status = db.query(models.ProcessingStatus).filter(
             models.ProcessingStatus.pdf_file_id == file_id,
             models.ProcessingStatus.user_id == user.user_id,
@@ -484,7 +483,7 @@ async def cancel_processing(
         if not status:
             raise HTTPException(status_code=404, detail="Processing not found or already finished")
 
-        # ✅ Устанавливаем флаг отмены
+        # Устанавливаем флаг отмены
         status.should_cancel = True
         db.commit()
 

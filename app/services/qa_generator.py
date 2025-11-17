@@ -174,7 +174,7 @@ class QAGenerator:
 
     def _generate_question_from_parts(self, subject: str, verb: str, obj: str, sentence: str) -> Optional[str]:
         """
-        ✅ НОВОЕ: генерирует КОНКРЕТНЫЙ вопрос на основе частей
+        ✅ НОВОЕ: генерирует вопрос на основе частей
         """
         verb_lower = verb.lower() if verb else ""
 

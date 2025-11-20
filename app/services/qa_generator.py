@@ -13,9 +13,7 @@ class QAGenerator:
     - Подлежащее (кто)
     - Глагол/предикат (что делал)
     - Дополнение (кого/что)
-
-    Результат: РАЗНЫЕ вопросы для РАЗНЫХ предложений!
-    """
+   """
 
     def __init__(self, use_gpt: bool = False):
         self.device = 0 if torch.cuda.is_available() else -1

@@ -30,7 +30,7 @@ def get_qa_generator():
 async def upload_pdf(
         file: UploadFile = File(...),
         user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)  # ✅ Use dependency injection
+        db: Session = Depends(get_db)
 ):
     try:
         folder = f"uploads/{user.user_id}/"

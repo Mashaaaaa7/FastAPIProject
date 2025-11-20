@@ -9,10 +9,6 @@ from app import models
 
 class QAGenerator:
     """
-    НОВАЯ архитектура QAGenerator v4.0
-
-    ✅ РЕВОЛЮЦИОННЫЙ подход:
-    Вместо 10 шаблонов - РЕАЛЬНО парсим текст
     Извлекаем:
     - Подлежащее (кто)
     - Глагол/предикат (что делал)
@@ -23,7 +19,7 @@ class QAGenerator:
 
     def __init__(self, use_gpt: bool = False):
         self.device = 0 if torch.cuda.is_available() else -1
-        print("✅ QAGenerator v4.0 инициализирован!", flush=True)
+        print("✅ QAGenerator инициализирован!", flush=True)
 
     def clean_text(self, text: str) -> str:
         """Очищает текст"""
@@ -105,7 +101,7 @@ class QAGenerator:
 
     def _extract_parts(self, sentence: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
-        ✅ НОВОЕ: извлекает части предложения:
+        извлекает части предложения:
         - subject (подлежащее)
         - verb (глагол/предикат)
         - obj (дополнение)
@@ -174,7 +170,7 @@ class QAGenerator:
 
     def _generate_question_from_parts(self, subject: str, verb: str, obj: str, sentence: str) -> Optional[str]:
         """
-        ✅ НОВОЕ: генерирует вопрос на основе частей
+        генерирует вопрос на основе частей
         """
         verb_lower = verb.lower() if verb else ""
 
